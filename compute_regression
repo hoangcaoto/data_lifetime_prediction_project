@@ -1,0 +1,196 @@
+import numpy as np
+import pandas as pd
+import itertools
+
+from sklearn import preprocessing
+from sklearn import metrics
+from sklearn import svm
+from sklearn.model_selection import GridSearchCV
+from sklearn.model_selection import RandomizedSearchCV
+from sklearn.model_selection import TimeSeriesSplit
+
+from sklearn.dummy import DummyRegressor
+from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import Ridge
+from sklearn.linear_model import Lasso
+from sklearn.linear_model import ElasticNet
+from sklearn.neural_network import MLPRegressor
+from sklearn.svm import SVR
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.ensemble import GradientBoostingRegressor
+from sklearn.ensemble import BaggingRegressor
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
+from sklearn.feature_selection import SelectKBest
+from sklearn.pipeline import Pipeline
+from sklearn.neighbors import KNeighborsRegressor
+from sklearn.tree import DecisionTreeRegressor
+
+import plotly as py
+import plotly.graph_objs as go
+
+def select_model(X_train : pd.DataFrame, X_test : pd.DataFrame,
+                 Y_train : pd.DataFrame, Y_test : pd.DataFrame,
+                 cv, algorithm : str):
+
+    # cross validation scoring (not Loss function !)
+    scorer = metrics.make_scorer(metrics.mean_squared_error, greater_is_better=False)
+
+    # model and hyperparameters selection
+    n_jobs = 1
+    verbose = 1
+
+    if algorithm == 'DUMMY':
+        model = DummyRegressor()
+    #Linear Machine Learning Methods    
+    elif algorithm == 'LINEAR_REGRESSION':
+        lr = LinearRegression()
+        param_grid = {'fit_intercept': [True]}
+        model = GridSearchCV(estimator=lr, param_grid=param_grid, cv=cv, scoring=scorer, verbose=verbose, n_jobs=n_jobs)
+        
+    elif algorithm == 'LASSO_REGRESSION':
+        lar = Lasso()
+        param_grid = {'fit_intercept': [True]}
+        model = GridSearchCV(estimator=lar, param_grid=param_grid, cv=cv, scoring=scorer, verbose=verbose, n_jobs=n_jobs)
+        
+    elif algorithm == 'ELASTICNET':
+        ela = ElasticNet()
+        param_grid = {'fit_intercept': [True]}
+        model = GridSearchCV(estimator=ela, param_grid=param_grid, cv=cv, scoring=scorer, verbose=verbose, n_jobs=n_jobs)
+        
+
+    elif algorithm == 'RIDGE_REGRESSION':
+        ridge = Ridge()
+        param_grid = {'alpha': [x for x in np.geomspace(5.0e-2, 1.e1, num=20)]}
+        model = GridSearchCV(estimator=ridge, param_grid=param_grid, cv=cv, scoring=scorer, verbose=verbose, n_jobs=n_jobs)
+
+#Nonlinear Machine Learning Methods   
+    elif algorithm == 'KNN':
+        tuned_parameters = [{'weights': ['uniform', 'distance'],
+                             'n_neighbors': range(2,10)
+                             }
+                            ]
+        model = GridSearchCV(KNeighborsRegressor(), tuned_parameters, cv=5, scoring='mean_squared_error')
+       
+    elif algorithm == 'MLP':
+        mlp = MLPRegressor()
+#        param_grid = {'alpha': [x for x in np.geomspace(1.0e-2, 10, num=5)],
+#                      'learning_rate_init': [x for x in np.geomspace(1.0e-2, 10, num=5)],
+#                      'hidden_layer_sizes': [(int(i), int(j)) for i, j in
+#                                             itertools.product(np.linspace(1, 100, num=5), np.linspace(1, 100, num=5))]}
+#        param_grid = {'alpha': [0.001,0.1],
+#                      'learning_rate_init': [0.001,1],
+#                      'hidden_layer_sizes': [(100,15) (15,100)]} 
+        
+        param_grid = {'alpha': [0.001,0.1],
+                      'learning_rate_init': [0.001,1]} 
+             
+        model = GridSearchCV(estimator=mlp, param_grid=param_grid, cv=cv, scoring=scorer, verbose=verbose, n_jobs=n_jobs)
+
+    elif algorithm == 'SVM':
+        svr = SVR(kernel='linear')
+        select = SelectKBest(k=2)
+        steps = [('feature_selection', select), ('svr', svr)]
+        pipeline = Pipeline(steps)
+        model = GridSearchCV(pipeline, param_grid={"svr__C":[10,10,100],"svr__gamma": np.logspace(-2, 2)})
+    
+    elif algorithm == 'DECISION_TREE' :
+        parameters={'min_samples_split' : range(10,500,20),'max_depth': range(1,20,2)}
+        dtr=DecisionTreeRegressor()
+        model=GridSearchCV(dtr,parameters)
+     
+     
+    #Ensemble Machine Learning Methods    
+    elif algorithm == 'RANDOM_FOREST':
+        rf = RandomForestRegressor()
+        n_estimators = [int(x) for x in np.linspace(start=200, stop=2000, num=10)]  # Number of trees in random forest
+        max_features = ['auto', 'sqrt']  # Number of features to consider at every split
+        max_depth = [int(x) for x in np.linspace(10, 110, num=11)]  # Maximum number of levels in tree
+        max_depth.append(None)
+        min_samples_split = [2, 5, 10]  # Minimum number of samples required to split a node
+        min_samples_leaf = [1, 2, 4]  # Minimum number of samples required at each leaf node
+        bootstrap = [True, False]  # Method of selecting samples for training each tree
+        random_grid = {'n_estimators': n_estimators,
+                       'max_features': max_features,
+                       'max_depth': max_depth,
+                       'min_samples_split': min_samples_split,
+                       'min_samples_leaf': min_samples_leaf,
+                       'bootstrap': bootstrap}
+        model = RandomizedSearchCV(estimator=rf, param_distributions=random_grid, n_iter=5, cv=cv, verbose=verbose,
+                                   random_state=None, scoring=scorer, n_jobs=n_jobs)
+        
+    elif algorithm == 'GRADIENT_BOOSTING':
+        gradientboost = GradientBoostingRegressor(n_estimators = 300)
+        loss = ['ls', 'lad', 'huber']
+        n_estimators = [100, 500, 900, 1100, 1500]
+        max_depth = [2, 3, 5, 10, 15]
+        min_samples_leaf = [1, 2, 4, 6, 8] 
+        min_samples_split = [2, 4, 6, 10]
+        max_features = ['auto', 'sqrt', 'log2', None]
+
+        # Define the grid of hyperparameters to search
+        hyperparameter_grid = {'loss': loss,
+                               'n_estimators': n_estimators,
+                               'max_depth': max_depth,
+                               'min_samples_leaf': min_samples_leaf,
+                               'min_samples_split': min_samples_split,
+                               'max_features': max_features}
+
+# Set up the random search with 4-fold cross validation
+        model = RandomizedSearchCV(estimator=gradientboost,
+            param_distributions=hyperparameter_grid,
+            cv=4, n_iter=50,
+            scoring = 'neg_mean_absolute_error',n_jobs = 4,
+            verbose = 5, 
+            return_train_score = True,
+            random_state=42)
+        
+    # elif algorithm == 'XGBOOST':
+    #     xg = xgboost.XGBRegressor()
+    #     n_estimators = [int(x) for x in np.linspace(start=50, stop=200, num=4)]  # Number of trees in random forest
+    #     max_depth = [int(x) for x in np.linspace(2, 5, num=4)]
+    #     learning_rate = np.geomspace(1.0e-3, 10, 10)
+    #     param_grid = {'n_estimators': n_estimators, 'max_depth': max_depth, 'learning_rate': learning_rate}
+    #     model = GridSearchCV(estimator=xg, param_grid=param_grid, cv=cv, scoring=scorer, verbose=verbose, n_jobs=n_jobs)   
+    
+    #elif algorithm == 'BAGGING':
+        #param_grid = {
+        #'base_estimator__max_depth' : [1, 2, 3, 4, 5],
+        #'max_samples' : [0.05, 0.1, 0.2, 0.5]
+        #}
+
+    #model = GridSearchCV(BaggingRegressor(),
+                   #param_grid, scoring = choosen_scoring)
+   # param_grid_br = {'n_estimators': range(36, 361, 36)}
+    #model = GridSearchCV(BaggingRegressor(), 
+                             #param_grid_br, n_jobs=5)
+    
+    # Deep Learning Methods
+    elif algorithm == 'MLP':
+        mlp = MLPRegressor()
+        param_grid = {'hidden_layer_sizes': [i for i in range(1,15)],
+              'activation': ['relu'],
+              'solver': ['adam'],
+              'learning_rate': ['constant'],
+              'learning_rate_init': [0.001],
+              'power_t': [0.5],
+              'alpha': [0.0001],
+              'max_iter': [1000],
+              'early_stopping': [False],
+              'warm_start': [False]}
+        model = GridSearchCV(mlp, param_grid=param_grid, scoring=scorer,
+                   cv=4, verbose=True, pre_dispatch='2*n_jobs')
+        #param_grid = {'alpha': [x for x in np.geomspace(1.0e-2, 10, num=5)],
+                      #'learning_rate_init': [x for x in np.geomspace(1.0e-2, 10, num=5)],
+                      #'hidden_layer_sizes': [(int(i), int(j)) for i, j in
+                                             #itertools.product(np.linspace(1, 100, num=5), np.linspace(1, 100, num=5))]}
+        #model = GridSearchCV(estimator=mlp, param_grid=param_grid, cv=cv, scoring=scorer, verbose=verbose, n_jobs=n_jobs)
+
+       
+    #Exponential Smoothing Methods
+    #elif algorithm == 'HOLT-WINTER':
+        #hw = ExponentialSmoothing()
+        #param_grid = {'alpha': [x for x in np.geomspace(5.0e-2, 1.e1, num=20)]}
+        #model = GridSearchCV(estimator=hw, param_grid=param_grid, cv=cv, scoring=scorer, verbose=verbose, n_jobs=n_jobs)
+        
+    return model
+

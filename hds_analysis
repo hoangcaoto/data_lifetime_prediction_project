@@ -1,0 +1,264 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import sys
+from compute_wabit import compute_wabit
+from clean_outliers import clean_outliers
+from compute_regression import select_model
+from custom_cross_validator import RegularMultipleTimeSeriesSplit
+from custom_cross_validator import PIMultipleTimeSeriesSplit
+
+from sklearn import preprocessing
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn import metrics
+
+import plotly as py
+import plotly.graph_objs as go
+
+if __name__ == "__main__":
+
+    #  user option for console display
+    pd.set_option('display.max_columns', 12)
+    pd.set_option('display.width', 350)
+
+    # load data
+    op_data = pd.read_csv('../../data/processed_data/op_data.csv', header=[0,1], index_col=0, parse_dates=True)
+    lab_data = pd.read_csv('../../data/processed_data/lab_data.csv', header=[0,1], index_col=0, parse_dates=True)
+
+    # remove outliers
+    lab_data = clean_outliers(lab_data)
+    op_data = clean_outliers(op_data)
+
+    # clean values based on business knowledge
+    lab_data[lab_data['HDS Effluent', 'AZUFRE'] > lab_data['Feed to HDS', 'AZUFRE']] = np.NaN
+
+    # compute WABIT for each HDS bed
+    wabit_R400_bed1 = compute_wabit(data=op_data, bed=1)
+    wabit_R400_bed2 = compute_wabit(data=op_data, bed=2)
+
+    op_data['R-400  BED 1 T ', 'WABIT BED 1'] = wabit_R400_bed1
+    op_data['R-400  BED 2 T ', 'WABIT BED 2'] = wabit_R400_bed2
+
+    # plot
+    plot = True
+    if plot == True:
+        plot_data = []
+        data = lab_data
+        type = 'HDS Effluent'  # -Feed to HDS- / -HDS Effluent- / -R-400  BED 1 T - / -R-400  BED 2 T -
+        for col in data[type]:
+            x = data.index.date  # warning datetimeindex not supported by plotly (adds random hour info...)
+            y = data[(type, col)]
+            trace = go.Scatter(x=x, y=y, name=col, mode='markers')
+            plot_data.append(trace)
+
+        layout = go.Layout(
+            title=type,
+            xaxis=dict(title='Time', titlefont=dict(family='Courier New, monospace', size=18, color='#7f7f7f')),
+            yaxis=dict(title='', titlefont=dict(family='Courier New, monospace', size=18, color='#7f7f7f'))
+        )
+        fig = go.Figure(data=plot_data, layout=layout)
+        plot_url = py.offline.plot(fig, filename='HDS.html')
+
+    # preprocess data -> merge useful data into a single dataframe
+
+    X_op = pd.concat([ op_data['FEED FLOW', 'HQF403.PV'], # hds flowrate
+                       op_data['HDS cycle'] ], axis=1)
+    # necessary to join with other multiindex dataframe
+    X_op.columns = pd.MultiIndex.from_tuples(tuples=[('FEED FLOW','HQF403.PV'),('HDS cycle','cycle')])
+
+    X_lab = pd.concat([ lab_data['Feed', '1'],  # boiling point : indicator of feed difficulty
+                        lab_data['Feed to HDS', 'AZUFRE'], lab_data['Feed', 'Olefins (FIA)'],  # hds in
+                        lab_data['HDS Effluent', 'AZUFRE'], lab_data['Treatedgasoline', 'olefinas'] ], axis=1)  # hds out
+    X = X_op.join(X_lab, how='outer')
+
+    Y = pd.DataFrame( (op_data['R-400  BED 1 T ', 'WABIT BED 1'] + op_data['R-400  BED 2 T ', 'WABIT BED 2']) / 2)
+    Y.columns = pd.MultiIndex.from_tuples(tuples=[('WABIT','T')])
+
+    XY = X.join(Y, how='outer')
+    XY.columns = ['flowrate', 'cycle', 'T_ebul', 'S_in', 'Ole_in', 'S_out', 'Ole_out', 'WABIT']
+    XY['hds_rate'] = 1 - XY['S_out'] / XY['S_in']  # HDS rate
+
+    # add column : days of operations in current cycle
+    XY['Days'] = 0
+    for index_cycle in range(2, 6):
+        current_cycle = ( XY['cycle'] == index_cycle )
+        current_cycle_index = XY[current_cycle].index
+        origin = current_cycle_index[0]
+        Delta = (current_cycle_index - origin).days
+        XY.loc[current_cycle_index, 'Days'] = Delta
+
+    # select features for learning
+    features = ['flowrate', 'T_ebul', 'S_in', 'Ole_in', 'S_out', 'Ole_out', 'Days']
+    XY = XY[features + ['WABIT', 'cycle']]
+
+    #  Remove all NaN
+    XY = XY.dropna(how='any')
+
+    # split by cycle
+    n_cycles = 4
+    XY_cycle = []
+    for index_cycle in range(2,6):
+        cycle = XY[XY['cycle'] == index_cycle]
+        XY_cycle.append(cycle)
+
+    # Learn from data
+
+    algorithm = 'RIDGE_REGRESSION'  # DUMMY / LINEAR_REGRESSION / RIDGE_REGRESSION / MLP / SVM / RANDOM_FOREST / XGBOOST
+    model_type = 'REGULAR'  # POPULATION_INFORMED / REGULAR / SINGLE_CYCLE / CYCLE_PREDICTION
+    target_cycle_index = 0
+    target_cycle = XY_cycle[target_cycle_index]
+
+    if model_type == 'SINGLE_CYCLE':
+
+        # split train test
+        train_size = int(0.7 * len(target_cycle))
+        train = target_cycle.iloc[0:train_size, :]
+        test = target_cycle.iloc[train_size:, :]
+
+        # select data
+        X_train, Y_train = train[features], train['WABIT']
+        X_test, Y_test = test[features], test['WABIT']
+
+        # scaling
+        scaler = preprocessing.StandardScaler().fit(X_train)
+        X_train = pd.DataFrame(scaler.transform(X_train), index=X_train.index, columns=X_train.columns)
+        X_test = pd.DataFrame(scaler.transform(X_test), index=X_test.index, columns=X_test.columns)
+
+        # cross validation split
+        cv = TimeSeriesSplit(n_splits=3)
+
+    elif model_type == 'REGULAR':
+
+        # split train test
+        train_sizes = [ int(0.7 * len(x)) for x in XY_cycle ]
+        train = []
+        for i in range(n_cycles):
+            train.append(XY_cycle[i].iloc[0:train_sizes[i], :])
+        train = pd.concat(train, axis=0)
+        test = target_cycle.iloc[train_sizes[target_cycle_index]:, :]
+
+        # select data
+        X_train, Y_train = train[features], train['WABIT']
+        X_test, Y_test = test[features], test['WABIT']
+
+        # scaling
+        scaler = preprocessing.StandardScaler().fit(X_train)
+        X_train = pd.DataFrame(scaler.transform(X_train), index=X_train.index, columns=X_train.columns)
+        X_test = pd.DataFrame(scaler.transform(X_test), index=X_test.index, columns=X_test.columns)
+
+        # cross validation split
+        cv = RegularMultipleTimeSeriesSplit(target_cycle_index=target_cycle_index, cycles_length=train_sizes,
+                                            n_time_series=n_cycles, n_splits=3)
+
+    elif model_type == 'POPULATION_INFORMED':
+
+        # split train test
+        train_size = int(0.5 * len(target_cycle))
+        train = []
+        cycles_length = np.zeros(n_cycles, dtype=int)
+        for i in range(n_cycles):
+            if i == target_cycle_index:
+               train.append(target_cycle.iloc[0:train_size, :])
+               cycles_length[i] = train_size
+            else:
+                train.append(XY_cycle[i])
+                cycles_length[i] = len(XY_cycle[i])
+        train = pd.concat(train, axis=0)
+        test = target_cycle.iloc[train_size:,:]
+
+        # select data
+        X_train, Y_train = train[features], train['WABIT']
+        X_test, Y_test = test[features], test['WABIT']
+
+        # scaling
+        scaler = preprocessing.StandardScaler().fit(X_train)
+        X_train = pd.DataFrame(scaler.transform(X_train), index=X_train.index, columns=X_train.columns)
+        X_test = pd.DataFrame(scaler.transform(X_test), index=X_test.index, columns=X_test.columns)
+
+        # cross validation split
+        cv = PIMultipleTimeSeriesSplit(target_cycle_index=target_cycle_index, cycles_length=cycles_length,
+                                       n_time_series=n_cycles, n_splits=3)
+
+    elif model_type == 'CYCLE_PREDICTION':
+
+        # split train test
+        train_size = int(0.5 * len(target_cycle))
+        train = []
+        cycles_length = np.zeros(n_cycles-1, dtype=int)
+        icycle=0;
+        for i in range(n_cycles):
+            if i != target_cycle_index:
+                train.append(XY_cycle[icycle])
+                cycles_length[icycle] = len(XY_cycle[icycle])
+                icycle=icycle+1
+                
+        train = pd.concat(train, axis=0)
+        test = target_cycle.iloc[:,:]
+
+        # select data
+        X_train, Y_train = train[features], train['WABIT']
+        X_test, Y_test = test[features], test['WABIT']
+
+        # scaling
+        scaler = preprocessing.StandardScaler().fit(X_train)
+        X_train = pd.DataFrame(scaler.transform(X_train), index=X_train.index, columns=X_train.columns)
+        X_test = pd.DataFrame(scaler.transform(X_test), index=X_test.index, columns=X_test.columns)
+
+        # cross validation split
+        #cv = PIMultipleTimeSeriesSplit(target_cycle_index=target_cycle_index, cycles_length=cycles_length,
+        #                               n_time_series=n_cycles, n_splits=3)
+        
+        #☺cv=CPMultipleTimeSeriesSplit(target_cycle_index=target_cycle_index, cycles_length=cycles_length,
+        #                               n_time_series=n_cycles, n_splits=3)
+        cv=3
+        
+        
+        
+    model = select_model(X_train=X_train, X_test=X_test, Y_train=Y_train, Y_test=Y_test, cv=cv, algorithm=algorithm)
+
+    # model training
+    model.fit(X_train, Y_train)
+    if algorithm != 'DUMMY':
+        print("The best parameters are %s with a score of %0.2f" % (model.best_params_, model.best_score_))
+
+    # predictions on train and test sets
+    Y_train_pred = model.predict(X_train)
+    Y_train_pred = pd.Series(data=Y_train_pred, index=X_train.index)
+    Y_test_pred = model.predict(X_test)
+    Y_test_pred = pd.Series(data=Y_test_pred, index=X_test.index)
+
+    rmse_train = metrics.mean_squared_error(Y_train, Y_train_pred)
+    rmse_test = metrics.mean_squared_error(Y_test, Y_test_pred)
+
+    #  plot predictions
+    if model_type == 'SINGLE_CYCLE':
+        start = 0
+        end = len(Y_train)
+    elif model_type == 'REGULAR':
+        start = np.sum(train_sizes[:target_cycle_index])
+        end = np.sum(train_sizes[:target_cycle_index+1])
+    elif model_type == 'POPULATION_INFORMED':
+        start = np.sum(cycles_length[:target_cycle_index])
+        end = np.sum(cycles_length[:target_cycle_index + 1])
+    if model_type!='CYCLE_PREDICTION':
+        Y_train = Y_train.iloc[start:end]
+        Y_train_pred = Y_train_pred.iloc[start:end]
+    if model_type!='CYCLE_PREDICTION':
+        trace0 = go.Scatter(x=Y_train.index, y=Y_train, name='True - train', mode='lines+markers',)
+    trace1 = go.Scatter(x=Y_test.index, y=Y_test, name='True - test', mode='lines+markers',)
+    if model_type!='CYCLE_PREDICTION':
+        trace2 = go.Scatter(x=Y_train_pred.index, y=Y_train_pred, name='Pred - train', mode='lines+markers',)
+    trace3 = go.Scatter(x=Y_test_pred.index, y=Y_test_pred, name='Pred - test', mode='lines+markers',)
+    if model_type!='CYCLE_PREDICTION':
+        data = [trace0, trace1, trace2, trace3]
+    else:
+        data = [trace1, trace3]
+    layout = go.Layout(
+        title=algorithm+' - '+model_type+' - Cycle: '+str(target_cycle_index),
+        xaxis=dict(title='Time', titlefont=dict(family='Courier New, monospace', size=18, color='#7f7f7f')),
+        yaxis=dict(title='WABIT', titlefont=dict(family='Courier New, monospace', size=18, color='#7f7f7f')),
+    )
+    fig = go.Figure(data=data, layout=layout)
+    py.offline.plot(fig, filename='predVStrue.html')
+
+

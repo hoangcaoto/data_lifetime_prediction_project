@@ -1,0 +1,113 @@
+from sklearn.utils import indexable
+from sklearn.utils.validation import _num_samples
+import numpy as np
+
+class RegularMultipleTimeSeriesSplit:
+
+    def __init__(self, cycles_length, target_cycle_index, n_time_series,
+                 n_splits=3, max_train_size=None):
+
+        self.cycles_length = cycles_length
+        self.target_cycle_index = target_cycle_index
+        self.n_time_series = n_time_series
+        self.n_splits = n_splits
+        self.max_train_size = max_train_size
+
+    def split(self, X, y=None, groups=None):
+
+        X, y, groups = indexable(X, y, groups)
+        n_samples = _num_samples(X)
+        n_splits = self.n_splits
+        n_folds = n_splits + 1
+
+        indices = np.arange(n_samples)
+
+        cycles_length = self.cycles_length
+        n_cycles = len(cycles_length)
+
+        cycles = []
+        start = 0
+        end = cycles_length[0]
+        for i in range(n_cycles):
+            cycle = indices[start:end]
+            cycles.append(cycle)
+            if i < n_cycles - 1:
+                start = start + cycles_length[i]
+                end = end + cycles_length[i + 1]
+
+        test_sizes = np.apply_along_axis(lambda x: x // n_folds, 0, cycles_length)
+        test_offset = np.apply_along_axis(lambda x: x % n_folds, 0, cycles_length)
+
+        target_cycle_index = self.target_cycle_index
+
+        for i in range(n_splits):
+            test_indices = cycles[target_cycle_index][test_offset[target_cycle_index] + (i + 1) * test_sizes[target_cycle_index]
+                                                      :test_offset[target_cycle_index] + (i + 2) * test_sizes[target_cycle_index]]
+            train_indices = []
+            for j in range(n_cycles):
+                train_indices = np.concatenate( [train_indices, cycles[j][0:test_offset[j] + (i + 1) * test_sizes[j]]] )
+            yield (train_indices, test_indices)
+
+    def get_n_splits(self, X=None, y=None, groups=None):
+
+        return self.n_splits
+
+
+class PIMultipleTimeSeriesSplit:
+
+    def __init__(self, cycles_length, target_cycle_index, n_time_series,
+                 n_splits=3, max_train_size=None):
+
+        self.cycles_length = cycles_length
+        self.target_cycle_index = target_cycle_index
+        self.n_time_series = n_time_series
+        self.n_splits = n_splits
+        self.max_train_size = max_train_size
+
+    def split(self, X, y=None, groups=None):
+
+        X, y, groups = indexable(X, y, groups)
+        n_samples = _num_samples(X)
+        n_splits = self.n_splits
+        n_folds = n_splits + 1
+
+        indices = np.arange(n_samples)
+
+        cycles_length = self.cycles_length
+        n_cycles = len(cycles_length)
+
+        cycles = []
+        start = 0
+        end = cycles_length[0]
+        for i in range(n_cycles):
+            cycle = indices[start:end]
+            cycles.append(cycle)
+            if i < n_cycles - 1:
+                start = start + cycles_length[i]
+                end = end + cycles_length[i + 1]
+
+        target_cycle_index = self.target_cycle_index
+
+        n_target_cycle = len(cycles[target_cycle_index])
+        test_size = n_target_cycle // n_folds
+        test_offset = n_target_cycle % n_folds
+
+        for i in range(n_splits):
+            test_indices = cycles[target_cycle_index][test_offset + (i + 1) * test_size :
+                                                      test_offset + (i + 2) * test_size]
+            train_indices = []
+            for j in range(n_cycles):
+                if j == target_cycle_index:
+                    train_indices = np.concatenate(
+                        [train_indices, cycles[j][0:test_offset + (i + 1) * test_size]])
+                else:
+                    train_indices = np.concatenate(
+                        [train_indices, cycles[j][:]])
+
+            yield (train_indices, test_indices)
+
+    def get_n_splits(self, X=None, y=None, groups=None):
+
+        return self.n_splits
+
+

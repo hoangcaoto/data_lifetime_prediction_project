@@ -1,0 +1,26 @@
+import numpy as np
+import pandas as pd
+import sys
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+
+def clean_outliers(data: pd.DataFrame) -> pd.DataFrame:
+
+    # split string and numerical columns
+
+    numeric_columns = list(data.select_dtypes(include=[np.number]).columns.values)
+    string_columns = list(data.select_dtypes(include=[object]).columns.values)
+
+    # remove outliers
+
+    # IQR method
+    for col_name in numeric_columns:
+        col = data[col_name].copy()
+        q_low = col.quantile(0.05)  # conservative value
+        q_high = col.quantile(0.95)
+        IQR = q_high - q_low
+        col[(col < (q_low - 2 * IQR)) | (col > (q_high + 2 * IQR)) ] = np.NaN
+        data[col_name] = col
+
+    return data
